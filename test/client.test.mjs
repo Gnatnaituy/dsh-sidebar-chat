@@ -509,7 +509,7 @@ describe('client bundle', () => {
                 name: '模型',
                 image: true,
                 contextWindow: 1000000,
-                reasoning: { efforts: [{ id: 'low', name: '低' }], defaultEffort: 'low' },
+                reasoning: { efforts: [{ id: 'low', name: '低' }, { id: 'max', name: 'Max' }], defaultEffort: 'low' },
               },
             ],
           },
@@ -518,22 +518,32 @@ describe('client bundle', () => {
     })
     const panelTree = renderBody(body, { useTabInfo: () => info })
     assertRenderable(panelTree)
-    const menuLabels = elementsOf(panelTree, 'div')
-      .filter((node) => node.props['data-menu-label'] !== undefined)
-      .map((node) => node.props['data-menu-label'])
-    assert.deepEqual(menuLabels, ['供应商'])
-    const rows = elementsOf(panelTree, 'button').filter((node) => node.props['data-menu-item'] !== undefined)
-    assert.deepEqual(
-      rows.map((node) => node.props['data-menu-item']),
-      ['model:p/m', 'effort', 'effort:', 'effort:low', 'action:reload'],
-    )
-    assert.ok(textsOf(panelTree).map(String).includes('图片'), 'the vision badge is shown')
 
-    // Picking a model adopts it, remembers it, and closes the menu.
-    rows.find((node) => node.props['data-menu-item'] === 'model:p/m').props.onClick()
+    // The picker card carries one group band per provider; the reasoning
+    // effort is NOT in it (it lives in its own chip beside the model chip).
+    const labels = elementsOf(panelTree, 'div')
+      .filter((node) => node.props.className === 'dsh-sc-pickerGroup')
+      .map((node) => textsOf(node).map(String).join(''))
+    assert.deepEqual(labels, ['供应商'])
+    const modelRows = elementsOf(panelTree, 'button').filter((node) => node.props['data-dsh-sc'] === 'model-row')
+    assert.deepEqual(modelRows.map((node) => node.props.key), ['model:p/m'])
+    assert.ok(textsOf(panelTree).map(String).includes('图片'), 'the vision badge is shown')
+    assert.equal(elementsOf(panelTree, 'button').filter((node) => node.props['data-dsh-sc'] === 'effort-row').length, 0)
+
+    // Picking a model adopts it, defaults the effort to the strongest, and
+    // closes the picker — leaving the effort chip beside the model chip.
+    modelRows[0].props.onClick()
     const chosen = JSON.parse(windowStub.localStorage.getItem('dsh-sidebar-chat:last-model'))
-    assert.deepEqual(chosen, { provider: 'p', model: 'm', reasoningEffort: 'low' })
+    assert.deepEqual(chosen, { provider: 'p', model: 'm', reasoningEffort: 'max' })
     assert.equal(state.get().menu, '')
+
+    // The effort chip sits next to the model selector and lists the levels
+    // vertically (the kit menu, no sideways submenu).
+    renderBody(body, { useTabInfo: () => info })
+    const effortChip = elementsOf(panelTree, 'button').find((node) => node.props['data-dsh-sc'] === 'effort-button')
+    assert.ok(effortChip !== undefined, 'the effort chip appears once a model is chosen')
+    effortChip.props.onClick()
+    assert.equal(state.get().menu, 'efforts')
   })
 
   it('renders through the shell kit when it resolves', async () => {
@@ -771,6 +781,60 @@ describe('client bundle', () => {
     assert.equal(toggle.props['data-pill'], 'off')
     toggle.props.onClick()
     assert.equal(state.get().searchOn, true)
+  })
+
+  it('keeps the effort chip out of the picker until a model with efforts is chosen', async () => {
+    const { plugin, react, renderBody } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+    const body = componentOf(ctx, 'sidebar.right.pane.tab')
+    const state = plugin._internal.stateOf('tab-effort')
+    state.set({
+      status: 'ready',
+      provider: 'p',
+      model: 'no-effort',
+      conversation: null,
+      catalog: {
+        default: {},
+        groups: [
+          {
+            id: 'p',
+            name: '供应商',
+            models: [
+              { id: 'no-effort', name: '朴素', contextWindow: 64000 },
+              { id: 'thinking', name: '会思考', reasoning: { efforts: [{ id: 'low', name: '低' }, { id: 'max', name: 'Max' }] } },
+            ],
+          },
+        ],
+      },
+    })
+    const info = { tab: { id: 'tab-effort' }, sidebar: {}, panel: {} }
+    const chipOf = (tree, mark) => elementsOf(tree, 'button').find((node) => node.props['data-dsh-sc'] === mark)
+
+    const tree = renderBody(body, { useTabInfo: () => info })
+    assert.equal(chipOf(tree, 'effort-button'), undefined, 'no effort chip while the model declares none')
+
+    // Open the picker: the card hugs its content and the groups are bands.
+    state.set({ menu: 'models' })
+    const pickerTree = renderBody(body, { useTabInfo: () => info })
+    const card = elementsOf(pickerTree, 'div').find((node) => node.props['data-dsh-sc'] === 'model-picker')
+    assert.ok(card !== undefined)
+    assert.match(card.props.className, /dsh-sc-picker/)
+    assert.deepEqual(
+      elementsOf(pickerTree, 'div')
+        .filter((node) => node.props.className === 'dsh-sc-pickerGroup')
+        .map((node) => node.props['data-dsh-sc']),
+      ['model-group'],
+      'providers are one band each',
+    )
+
+    // Pick the thinking model: the chip appears beside the model chip, at Max.
+    elementsOf(pickerTree, 'button').find((node) => node.props.key === 'model:p/thinking').props.onClick()
+    const after = renderBody(body, { useTabInfo: () => info })
+    const effortChip = chipOf(after, 'effort-button')
+    assert.ok(effortChip !== undefined, 'the effort chip appears after picking a model with efforts')
+    assert.ok(textsOf(effortChip).map(String).join('').includes('Max'), 'the default effort is the strongest')
+    assert.equal(state.get().menu, '', 'picking a model closes the picker')
   })
 
   it('treats a conversation without a stored preference as searching', async () => {
