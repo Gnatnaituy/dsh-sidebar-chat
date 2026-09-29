@@ -1,0 +1,51 @@
+{
+  "name": "dsh-sidebar-chat",
+  "version": "0.1.0",
+  "description": "DSH 插件：在右侧栏里开一个聊天标签页——可选模型、可发文字与图片，不绑定工作目录，图片直接落在系统临时文件夹。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "harness",
+    "cordis",
+    "sidebar",
+    "chat"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "install:profile": "node tools/install-into-profile.mjs",
+    "install:profile:dry": "node tools/install-into-profile.mjs --dry-run",
+    "uninstall:profile": "node tools/install-into-profile.mjs --uninstall"
+  }
+}
