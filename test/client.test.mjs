@@ -588,6 +588,19 @@ describe('client bundle', () => {
     assert.ok(actions.includes('action:delete'))
   })
 
+  it('keeps the answer black and the reasoning visibly dimmer', async () => {
+    const { plugin, styles } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+
+    // The kit's compact markdown dims its text (label-tertiary); the answer
+    // forces label-primary back in via the variant marker the kit emits.
+    const css = styles.get('dsh-sidebar-chat-style').textContent
+    assert.match(css, /data-markdown-variant="compact"\] \{ color: var\(--dsw-alias-label-primary\)/)
+    assert.match(css, /\.dsh-sc-reasoning \{[^}]*color: var\(--dsw-alias-label-tertiary\)/)
+    assert.doesNotMatch(css, /\.dsh-sc-reasoning \{[^}]*color: var\(--dsw-alias-label-secondary\)/)
+  })
+
   it('refreshes its stylesheet when a live page reloads the module', async () => {
     const { plugin, styles } = await loadClient({ withPrimitives: true })
     const { ctx } = createContext()
