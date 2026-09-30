@@ -8,20 +8,22 @@
  *   1. link (or copy) the package into the profile's `node_modules`, so both the
  *      Cordis Loader and the client-module scanner can resolve `dsh-sidebar-chat`
  *      from the profile's own resolution base;
- *   2. list it in `dependencies`, so the profile's manifest records where the
- *      package came from;
- *   3. mount one Loader row in the profile's `cordis.patch.yml`, which is the
- *      user layer the profile hot-reloads — so the tab appears without
- *      restarting DSH.
+ *   2. list it in `dependencies`, and in `dsh.profile.bundles` — the bundle form
+ *      is the supported mount, and the one this package declares for itself in
+ *      its root `cordis.patch.yml`. A hand-written row in the profile's own
+ *      `cordis.patch.yml` would be a second mount of the same entry id;
+ *   3. sweep such a hand-written row when an earlier revision of this script
+ *      left one behind, so the profile ends up with exactly one mount.
  *
- * The package also ships a bundle patch (`cordis.patch.yml` at its root) for the
- * `dsh.profile.bundles` install route. The two routes are mutually exclusive:
- * both insert the same row id and the Loader rejects a duplicate entry, so this
- * script refuses to run while the package is also listed as a bundle.
+ * dsh-sidebar-browser and dsh-token-usage mount the same way, so all three
+ * sidebar plugins sit in one place.
+ *
+ * The profile hot-reloads both the manifest's `bundles` list and the profile
+ * patch, so the mount lands without a restart.
  *
  * Usage:
- *   node tools/install-into-profile.mjs [--profile <dir>] [--copy] [--dry-run]
- *   node tools/install-into-profile.mjs --uninstall
+ *   node tools/install-into-profile.mjs [--profile <dir>] [--name <profile>] [--copy] [--dry-run]
+ *   node tools/install-into-profile.mjs --uninstall [--dry-run]
  */
 
 import {
@@ -42,8 +44,8 @@ import { fileURLToPath } from 'node:url'
 const PACKAGE_NAME = 'dsh-sidebar-chat'
 /** Loader entry id of the mounted row. */
 const ENTRY_ID = 'sidebar-chat'
-/** A bundle row here would collide with the entry this script inserts. */
-const BUNDLE_ROW = PACKAGE_NAME
+/** Insert the bundle row after the web app, so UI plugins stay grouped. */
+const BUNDLE_AFTER = '@deepseek-ai/dsh-web-app'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const argv = process.argv.slice(2)
@@ -70,51 +72,44 @@ const profileDir = resolve(
 /** Prefix a progress line for a dry run. */
 const say = (message) => console.log(`${dryRun ? '[dry-run] ' : ''}${message}`)
 
-/** The comment paragraph introducing the inserted row, kept in sync with removal. */
-const ENTRY_COMMENT = [
-  '# 侧边栏聊天（dsh-sidebar-chat）：在右侧栏新增一个「聊天」页签。',
-  '# host 半提供 /dsh-sidebar-chat/* 路由（模型列表、聊天流、附件、历史），',
-  '# client 半注册侧边栏页签类型。想停用：把下面这行的 disabled 改成 true；',
-  '# 想彻底移除：跑 node tools/install-into-profile.mjs --uninstall',
-].join('\n')
-
-/** The exact patch text this script owns, including its comment header. */
-const ENTRY_BLOCK = `${ENTRY_COMMENT}\n- insert:\n    - id: ${ENTRY_ID}\n      name: ${PACKAGE_NAME}\n`
-
 /**
- * Drop our install block, comment paragraph included, from a patch file.
+ * Drop one patch entry, the comment paragraph documenting it, and — for an
+ * `- insert:` list — the `- insert:` line that owns the row.
  *
- * Comments may be separated from the entry by a blank line and may sit above or
- * below other entries, so the block is located by the row it inserts and then
- * widened to the contiguous comment paragraph that documents it.
+ * The entry is located by its id, so both shapes this package can leave in a
+ * profile are recognized: the hand-written mount
+ * (`- insert:` + `    - id: sidebar-chat`), and the disable switch
+ * (`- id: sidebar-chat` + `  disabled: true`). Comments may be separated from
+ * the entry by a blank line and may sit above or below other entries.
+ *
  * @param text - the patch file's contents.
- * @returns the patch without our block, and whether anything was removed.
+ * @param id - the entry id to drop.
+ * @param options - `insertOnly` leaves a plain (non-insert) entry alone.
+ * @returns the patch without that entry, and whether anything was removed.
  */
-function dropInstallBlock(text) {
+function dropEntry(text, id, options = {}) {
+  const { insertOnly = false } = options
   const lines = text.split('\n')
-  const at = lines.findIndex((line) => line.trim() === `- id: ${ENTRY_ID}`)
+  const at = lines.findIndex((line) => new RegExp(`^\\s*-\\s*id:\\s*${id}\\s*$`).test(line))
   if (at < 0) return { text, removed: false }
-  let start = at
-  while (start > 0 && /^\s{4,}\S/.test(lines[start - 1])) start -= 1
-  if (start > 0 && lines[start - 1].trim() === '- insert:') start -= 1
-  while (start > 0 && (lines[start - 1].trim() === '' || /^\s*#/.test(lines[start - 1]))) start -= 1
-  let end = at + 1
-  while (end < lines.length && /^\s{4,}\S/.test(lines[end])) end += 1
-  lines.splice(start, end - start)
-  return { text: `${lines.join('\n').replace(/\n{4,}/g, '\n\n\n').replace(/\s*$/, '')}\n`, removed: true }
-}
 
-/**
- * Add our install block to a patch file when it is absent.
- * @param text - the patch file's contents.
- * @returns the patch with our block, and whether anything was added.
- */
-function addInstallBlock(text) {
-  const hasRow = new RegExp(`^\\s*name:\\s*${PACKAGE_NAME}\\s*$`, 'm').test(text)
-  const hasId = new RegExp(`^\\s*-\\s*id:\\s*${ENTRY_ID}\\s*$`, 'm').test(text)
-  if (hasRow || hasId) return { text, added: false }
-  const body = text.replace(/\s*$/, '')
-  return { text: `${body}\n\n${ENTRY_BLOCK}`, added: true }
+  let end = at + 1
+  while (end < lines.length && /^\s+\S/.test(lines[end])) end += 1
+
+  let start = at
+  if (start > 0 && lines[start - 1].trim() === '- insert:') start -= 1
+  else if (insertOnly) return { text, removed: false }
+
+  while (start > 0 && (lines[start - 1].trim() === '' || /^\s*#/.test(lines[start - 1]))) start -= 1
+
+  lines.splice(start, end - start)
+  // Keep the entries that surrounded the block apart: the removed paragraph
+  // owned the blank line that separated them.
+  if (start > 0 && start < lines.length && lines[start - 1].trim() !== '' && lines[start].trim() !== '') {
+    lines.splice(start, 0, '')
+  }
+  const next = `${lines.join('\n').replace(/\n{4,}/g, '\n\n\n').replace(/\s*$/, '')}\n`
+  return { text: next, removed: true }
 }
 
 if (!existsSync(join(profileDir, 'package.json'))) {
@@ -126,40 +121,45 @@ say(`source:  ${projectRoot}`)
 
 const manifestPath = join(profileDir, 'package.json')
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-const bundles = Array.isArray(manifest.dsh?.profile?.bundles) ? manifest.dsh.profile.bundles : []
-if (bundles.includes(BUNDLE_ROW)) {
-  console.error(
-    `${BUNDLE_ROW} 已经在 dsh.profile.bundles 里：bundle 层和本脚本插入的 profile 补丁行会各自 insert 同一条目，\n` +
-      'Loader 会报 duplicate loader entry id。请二选一 —— 从 bundles 里删掉这个包（推荐，本脚本会补上等价的行），\n' +
-      '或者删掉 cordis.patch.yml 里的 sidebar-chat 行，只保留 bundle 挂载。',
-  )
-  process.exit(1)
-}
+manifest.dependencies = manifest.dependencies ?? {}
+manifest.dsh = manifest.dsh ?? {}
+manifest.dsh.profile = manifest.dsh.profile ?? {}
+const patchPath = join(profileDir, 'cordis.patch.yml')
+const patch = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
 
 // ------------------------------------------------------------------ uninstall
 
 if (uninstall) {
-  const patchPath = join(profileDir, 'cordis.patch.yml')
-  if (existsSync(patchPath)) {
-    const { text, removed } = dropInstallBlock(readFileSync(patchPath, 'utf8'))
-    if (removed) {
-      say('cordis.patch.yml -= sidebar-chat 行')
-      if (!dryRun) writeFileSync(patchPath, text)
-    } else {
-      say('cordis.patch.yml 没有 sidebar-chat 行')
-    }
+  // The patch first: a dangling `- id: sidebar-chat` would only make the Loader
+  // warn on every reload once the row it configures is gone.
+  const { text, removed } = dropEntry(patch, ENTRY_ID)
+  if (removed) {
+    say(`cordis.patch.yml -= ${ENTRY_ID} 行`)
+    if (!dryRun) writeFileSync(patchPath, text)
+  } else {
+    say(`cordis.patch.yml 没有 ${ENTRY_ID} 行`)
   }
-  if (manifest.dependencies?.[PACKAGE_NAME] !== undefined) {
+
+  let manifestChanged = false
+  if (manifest.dependencies[PACKAGE_NAME] !== undefined) {
     delete manifest.dependencies[PACKAGE_NAME]
+    manifestChanged = true
     say(`dependencies -= ${PACKAGE_NAME}`)
-    if (!dryRun) writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
   }
+  const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles : []
+  if (bundles.includes(PACKAGE_NAME)) {
+    manifest.dsh.profile.bundles = bundles.filter((entry) => entry !== PACKAGE_NAME)
+    manifestChanged = true
+    say(`dsh.profile.bundles -= ${PACKAGE_NAME}`)
+  }
+  if (manifestChanged && !dryRun) writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+
   const target = join(profileDir, 'node_modules', PACKAGE_NAME)
   if (existsSync(target) || lstatSync(target, { throwIfNoEntry: false }) !== undefined) {
     say(`删除 ${target}`)
     if (!dryRun) rmSync(target, { recursive: true, force: true })
   }
-  say('完成。刷新页面即可（client 半随模块系统卸载）。')
+  say('完成。loader 会热卸载；硬刷新浏览器即可。')
   process.exit(0)
 }
 
@@ -185,11 +185,10 @@ if (dryRun) {
   }
 }
 
-// ---------------------------------------------------- 2. dependency + 3. row
+// ---------------------------------------------------- 2. dependency + bundle
 
 const dependencySpec = copy ? `file:${target}` : `link:${projectRoot}`
 let manifestChanged = false
-manifest.dependencies = manifest.dependencies ?? {}
 if (manifest.dependencies[PACKAGE_NAME] !== dependencySpec) {
   manifest.dependencies[PACKAGE_NAME] = dependencySpec
   manifestChanged = true
@@ -197,20 +196,37 @@ if (manifest.dependencies[PACKAGE_NAME] !== dependencySpec) {
 } else {
   say(`dependencies 已包含 ${PACKAGE_NAME}`)
 }
-if (manifestChanged && !dryRun) writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-const patchPath = join(profileDir, 'cordis.patch.yml')
-const patch = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
-const { text: patched, added } = addInstallBlock(patch)
-if (added) {
-  say(`cordis.patch.yml += ${ENTRY_ID} 行`)
-  if (!dryRun) writeFileSync(patchPath, patched)
+const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles : []
+if (!bundles.includes(PACKAGE_NAME)) {
+  const at = bundles.indexOf(BUNDLE_AFTER)
+  if (at >= 0) bundles.splice(at + 1, 0, PACKAGE_NAME)
+  else bundles.push(PACKAGE_NAME)
+  manifestChanged = true
+  say(`dsh.profile.bundles += ${PACKAGE_NAME}`)
 } else {
-  say(`cordis.patch.yml 已包含 ${ENTRY_ID} 行`)
+  say(`dsh.profile.bundles 已包含 ${PACKAGE_NAME}`)
+}
+manifest.dsh.profile.bundles = bundles
+
+if (manifestChanged && !dryRun) {
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+// ---------------------------------------------------------------- 3. the patch
+
+// A hand-written mount from an earlier revision of this installer has to go: it
+// would insert the same entry id the bundle layer already contributes. A plain
+// `- id: sidebar-chat` entry is left alone — that is the documented disable
+// switch, and installing is not the place to overrule it.
+const swept = dropEntry(patch, ENTRY_ID, { insertOnly: true })
+if (swept.removed) {
+  say(`cordis.patch.yml -= 手写的挂载行（改由 bundle 层提供）`)
+  if (!dryRun) writeFileSync(patchPath, swept.text)
+} else {
+  say(`cordis.patch.yml 没有手写的挂载行`)
 }
 
 say(
-  added && !dryRun
-    ? '完成。cordis.patch.yml 会被热重载，几秒后刷新页面即可在右侧栏看到「聊天」页签；无需重启 DSH。'
-    : '完成。若页签没有立即出现，刷新一次页面；仍未出现时重启 DSH。',
+  '完成。profile 的 bundles 列表会被热重载，几秒后刷新页面即可在右侧栏看到「聊天」页签；无需重启 DSH。',
 )
