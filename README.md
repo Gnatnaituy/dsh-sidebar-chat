@@ -35,17 +35,27 @@ DSH（DeepSeek Harness）动态插件：**右侧栏里的一个聊天页签**。
 
 ```sh
 node tools/install-into-profile.mjs --dry-run   # 先看要改什么
-node tools/install-into-profile.mjs             # 幂等：软链 + link: 依赖 + bundle 挂载
-node tools/install-into-profile.mjs --uninstall # 卸载（只删自己插入的那一行）
+node tools/install-into-profile.mjs             # 幂等：软链 + link: 依赖 + bundles 挂载
+node tools/install-into-profile.mjs --uninstall # 卸载
 ```
 
 脚本做三件事，都不走 `dsh plugin add`（那会联网重解析整个 profile）：
 
 1. 把包软链（或 `--copy` 复制）进 profile 的 `node_modules`；
-2. 在 profile 的 `package.json` 里记一条 `link:` 依赖；
-3. 在 profile 的 `cordis.patch.yml` 里插入 `sidebar-chat` 这一行 —— 这一层会被热重载，**存盘几秒后刷新页面即可，不用重启**。
+2. 在 profile 的 `package.json` 里记一条 `link:` 依赖，并把包加进 `dsh.profile.bundles`（排在 `@deepseek-ai/dsh-web-app` 之后，UI 插件聚在一起）；
+3. 清扫旧版脚本可能留在 profile `cordis.patch.yml` 里的手写 `sidebar-chat` 行。
 
-包根目录另有一份 `cordis.patch.yml`，供 `dsh.profile.bundles` 那条安装路线使用。两条路线互斥：都会 insert 同一个条目 id，Loader 会报重复，脚本检测到包已在 bundles 里会直接拒绝执行。
+**为什么是 bundle 挂载**：要挂的那一行由包自己的 `cordis.patch.yml` 声明（`package.json` 的 `dsh.bundle.patch` 指向它），装进 `bundles` 就完事；再往 profile 的 `cordis.patch.yml` 里手写一行 `insert`，会是同一个 entry id 的第二次挂载。`dsh-sidebar-browser` 与 `dsh-token-usage` 都是这个放法，三个插件一致。
+
+profile 的 `bundles` 列表与 `cordis.patch.yml` 都会被热重载，**存盘几秒后刷新页面即可，不用重启**。
+
+想临时停用而不卸载，在 profile 的 `cordis.patch.yml` 里加一条（脚本的安装路径不会动它）：
+
+```yaml
+- id: sidebar-chat
+  name: dsh-sidebar-chat
+  disabled: true
+```
 
 刷新后：右侧栏「＋」菜单里会多一个「聊天」胶囊，主输入框左侧也会多一个聊天气泡按钮。
 

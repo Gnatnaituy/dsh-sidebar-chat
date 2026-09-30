@@ -11,10 +11,11 @@
 # 行名必须与包名完全一致：这是 Loader 解析包、以及 client-modules 扫描器查找
 # package.json 时使用的键。
 #
-# 注意：本文件只在包被列进 profile 的 `dsh.profile.bundles` 时才生效。如果改用
-# profile 自己的 cordis.patch.yml 手写同一行（tools/install-into-profile.mjs 走
-# 的就是这条路），请不要同时把包加进 bundles —— 两处都会 insert 同一 id，
-# Loader 会报重复条目。
+# 注意：本文件只在包被列进 profile 的 `dsh.profile.bundles` 时才生效 ——
+# tools/install-into-profile.mjs 走的就是这条路线，dsh-sidebar-browser 与
+# dsh-token-usage 也是。不要再往 profile 自己的 cordis.patch.yml 里手写同一行：
+# 两处都会 insert 同一 id，Loader 会报重复条目（旧版脚本留下的手写行，安装时
+# 会被脚本自动清掉）。
 - insert:
     - id: sidebar-chat
       name: dsh-sidebar-chat
