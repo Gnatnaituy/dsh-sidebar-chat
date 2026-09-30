@@ -1,7 +1,7 @@
 {
   "name": "dsh-sidebar-chat",
   "version": "0.1.0",
-  "description": "DSH 插件：在右侧栏里开一个聊天标签页——可选模型、可发文字与图片，不绑定工作目录，图片直接落在系统临时文件夹。",
+  "description": "DSH 插件：右侧栏里的聊天页签——选模型、发文字与图片、可联网搜索，不绑定工作目录。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
