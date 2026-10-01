@@ -228,8 +228,16 @@ function createKitStub(React) {
       h('button', { type: 'button', 'data-disclosure-toggle': true, onClick: () => props.expandable !== false && props.onToggle() }, props.icon, props.title),
       props.open === true ? props.children : null,
     )
-  const MarkdownText = (props) => h('div', { 'data-md': props.streaming === true ? 'streaming' : 'settled' }, props.text)
+  const MarkdownText = (props) => h('div', { 'data-md': props.streaming === true ? 'streaming' : 'settled', 'data-variant': props.variant }, props.text)
   const ImageLightbox = (props) => h('div', { 'data-lightbox': props.src }, props.alt)
+  const FishLogo = (props) => h('svg', { 'data-fish': true, width: props?.size ?? 24 })
+  // The real helper writes to the host clipboard; the stub records the calls so
+  // a test can assert what the copy action asked to be copied.
+  const clipboard = []
+  const writeClipboard = async (text) => {
+    clipboard.push(text)
+    return true
+  }
   const Menu = (props) => {
     if (props.open !== true) return h('span', { 'data-menu': 'closed', className: props.className }, props.anchor)
     const rows = []
@@ -257,9 +265,13 @@ function createKitStub(React) {
     ImageLightbox,
     TextShimmer,
     DisclosureRow,
+    FishLogo,
+    writeClipboard,
+    clipboard,
     IconNewChatOutlineRegular: icon('chat'),
     IconPlusOutlineRegular: icon('plus'),
     IconPaperclipOutlineRegular: icon('paperclip'),
+    IconPaperPlaneOutlineRegular: icon('paper-plane'),
     IconSendOutlineRegular: icon('send'),
     IconStopFillRegular: icon('stop'),
     IconFlatListOutlineRegular: icon('list'),
@@ -271,6 +283,9 @@ function createKitStub(React) {
     IconSparkleRegular: icon('sparkle'),
     IconThinkOutlineRegular: icon('think'),
     IconCheckOutlineRegular: icon('check'),
+    IconCopyOutlineRegular: icon('copy'),
+    IconGlobeOutlineRegular: icon('globe'),
+    IconSearchOutlineRegular: icon('search'),
   }
 }
 
@@ -322,10 +337,13 @@ async function loadClient(options = {}) {
   assert.ok(definition !== undefined, 'the bundle must call window.__ModuleLoader__.load')
   assert.equal(definition.id, 'dsh-sidebar-chat')
 
+  // One kit instance for the whole load, so a test can read back what the tab
+  // handed to the shell (the clipboard, for instance).
+  const kit = options.withPrimitives === true ? createKitStub(React) : null
   const require = (spec) => {
     if (spec === 'react') return React
     if (spec === '@deepseek-ai/dsh-client-ui-primitives') {
-      if (options.withPrimitives === true) return createKitStub(React)
+      if (kit !== null) return kit
       throw new Error('client-modules: require missed the module table')
     }
     throw new Error(`unexpected require("${spec}")`)
@@ -344,7 +362,7 @@ async function loadClient(options = {}) {
     return deepRender(body(props), react)
   }
 
-  return { plugin, react, renderBody, windowStub, styles }
+  return { plugin, react, renderBody, windowStub, styles, kit }
 }
 
 /**
@@ -446,8 +464,105 @@ describe('client bundle', () => {
     assertRenderable(tree)
     const texts = textsOf(tree)
     assert.ok(texts.some((text) => String(text).includes('不绑定工作目录')), 'the empty state explains the tab')
+    assert.ok(texts.includes('今天有什么可以帮到你？'), 'the empty tab opens on the chat web greeting')
     assert.equal(elementsOf(tree, 'textarea').length, 1)
     assert.equal(elementsOf(tree, 'input')[0].props.type, 'file')
+    assert.ok(texts.includes('内容由 AI 生成，请仔细甄别'), 'the composer carries the chat web caveat')
+    assert.equal(elementsOf(tree, 'button').filter((node) => node.props['data-dsh-sc'] === 'copy').length, 0, 'nothing to copy in an empty tab')
+  })
+
+  it('heads the thinking trace the way the chat web does, and only copies settled answers', async () => {
+    const { plugin, react, renderBody, kit } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+    const body = componentOf(ctx, 'sidebar.right.pane.tab')
+
+    const state = plugin._internal.stateOf('tab-think')
+    state.set({
+      status: 'ready',
+      conversation: {
+        id: 'c-think',
+        title: 't',
+        provider: 'p',
+        model: 'm',
+        messages: [
+          // A settled turn that measured its thinking time, a stopped one, and
+          // a turn still in flight.
+          { id: 'a1', role: 'assistant', text: '答一', reasoning: '想一', status: 'done', reasoningMs: 4200, at: 1 },
+          { id: 'a2', role: 'assistant', text: '答二', reasoning: '想二', status: 'aborted', at: 2 },
+          { id: 'a3', role: 'assistant', text: '答三', reasoning: '想三', status: 'streaming', at: 3 },
+          // A transcript restored from a build that stored no timing.
+          { id: 'a4', role: 'assistant', text: '答四', reasoning: '想四', status: 'done', at: 4 },
+        ],
+      },
+    })
+
+    const tree = renderBody(body, { useTabInfo: () => ({ tab: { id: 'tab-think' }, sidebar: {}, panel: {} }) })
+    assertRenderable(tree)
+    const texts = textsOf(tree).map(String)
+    assert.ok(texts.includes('已思考（用时 4 秒）'), 'a measured trace names its duration')
+    assert.ok(texts.includes('思考已停止'), 'a stopped turn says so instead of inventing a time')
+    assert.ok(texts.includes('正在思考'), 'a live turn shimmers as thinking')
+    assert.ok(texts.includes('已思考'), 'a trace with no stored timing still gets a heading')
+
+    // Opening a trace reveals the muted block the chat web uses for it — one
+    // step down from the answer and with no rule around it.
+    const toggles = elementsOf(tree, 'button').filter((node) => node.props['data-disclosure-toggle'] !== undefined)
+    assert.equal(toggles.length, 4, 'every trace is a disclosure')
+    toggles[0].props.onClick()
+    const opened = renderBody(body, { useTabInfo: () => ({ tab: { id: 'tab-think' }, sidebar: {}, panel: {} }) })
+    const traces = elementsOf(opened, 'div').filter((node) => node.props['data-dsh-sc'] === 'thinking')
+    assert.equal(traces.length, 1, 'only the opened trace renders its body')
+    assert.equal(traces[0].props.className, 'dsh-sc-thinkBody')
+    assert.equal(textsOf(traces[0]).map(String).join(''), '想一')
+
+    // Every answer that has text and is no longer streaming carries the action
+    // — a stopped turn included, since its partial answer is still readable.
+    const copies = elementsOf(tree, 'button').filter((node) => node.props['data-dsh-sc'] === 'copy')
+    assert.equal(copies.length, 3, 'one copy action per settled or stopped answer')
+
+    await copies[0].props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.deepEqual(kit.clipboard, ['答一'], 'the copy action hands the answer text to the shell clipboard')
+
+    // The answer is body markdown on the page, not the dimmed compact variant.
+    const markdown = elementsOf(tree, 'div').filter((node) => node.props['data-md'] !== undefined)
+    assert.ok(markdown.every((node) => node.props['data-variant'] === 'body'), 'answers render as body markdown')
+
+    // The greeting's whale is the shell's own mark when the kit resolves.
+    const empty = plugin._internal.stateOf('tab-think-empty')
+    empty.set({ status: 'ready', conversation: { id: 'c-e', title: 't', provider: 'p', model: 'm', messages: [] } })
+    const emptyTree = renderBody(body, { useTabInfo: () => ({ tab: { id: 'tab-think-empty' }, sidebar: {}, panel: {} }) })
+    assert.equal(elementsOf(emptyTree, 'svg').filter((node) => node.props['data-fish'] === true).length, 1, 'the greeting sits under the whale')
+  })
+
+  it('names both composer chips the way the chat web does', async () => {
+    const { plugin, react, renderBody } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+    const body = componentOf(ctx, 'sidebar.right.pane.tab')
+    const info = { tab: { id: 'tab-chips' }, sidebar: {}, panel: {} }
+    plugin._internal.stateOf('tab-chips').set({
+      status: 'ready',
+      catalogSearch: true,
+      searchOn: true,
+      provider: 'p',
+      model: 'thinking',
+      catalog: {
+        default: {},
+        groups: [{ id: 'p', name: '供应商', models: [{ id: 'thinking', name: '会思考', reasoning: { efforts: [{ id: 'low', name: '低' }, { id: 'max', name: 'Max' }] } }] }],
+      },
+    })
+
+    const tree = renderBody(body, { useTabInfo: () => info })
+    const chipText = (mark) => {
+      const chip = elementsOf(tree, 'button').find((node) => node.props['data-dsh-sc'] === mark)
+      assert.ok(chip !== undefined, `no ${mark} chip`)
+      return textsOf(chip).map(String).join('')
+    }
+    assert.equal(chipText('effort-button'), '深度思考', 'the effort chip is the chat web DeepThink switch')
+    assert.ok(chipText('search-toggle').includes('联网搜索'), 'the search chip is labelled in full')
+    assert.equal(elementsOf(tree, 'button').find((node) => node.props['data-dsh-sc'] === 'search-toggle').props['data-pill'], 'on')
   })
 
   it('renders a seeded transcript, falling back to plain text without the primitives module', async () => {
@@ -487,7 +602,7 @@ describe('client bundle', () => {
     assert.ok(texts.includes('这是什么？'))
     assert.ok(texts.some((text) => text.includes('RATE_LIMIT') && text.includes('慢一点')))
     assert.ok(texts.some((text) => text.includes('输入 5')))
-    assert.ok(texts.includes('思考中'), 'a streaming turn names its reasoning as running')
+    assert.ok(texts.includes('正在思考'), 'a streaming turn names its reasoning as running')
     assert.equal(elementsOf(tree, 'textarea')[0].props.value, '接下来问什么')
     assert.equal(windowStub.localStorage.getItem('dsh-sidebar-chat:last-model'), null)
     assert.equal(plugin._internal.usingKit, false, 'the fallback kit is what rendered here')
@@ -588,17 +703,30 @@ describe('client bundle', () => {
     assert.ok(actions.includes('action:delete'))
   })
 
-  it('keeps the answer black and the reasoning visibly dimmer', async () => {
+  it('paints the answer in the chat web palette and the reasoning dimmer', async () => {
     const { plugin, styles } = await loadClient({ withPrimitives: true })
     const { ctx } = createContext()
     plugin.apply(ctx)
 
-    // The kit's compact markdown dims its text (label-tertiary); the answer
-    // forces label-primary back in via the variant marker the kit emits.
     const css = styles.get('dsh-sidebar-chat-style').textContent
-    assert.match(css, /data-markdown-variant="compact"\] \{ color: var\(--dsw-alias-label-primary\)/)
-    assert.match(css, /\.dsh-sc-reasoning \{[^}]*color: var\(--dsw-alias-label-tertiary\)/)
-    assert.doesNotMatch(css, /\.dsh-sc-reasoning \{[^}]*color: var\(--dsw-alias-label-secondary\)/)
+    // The answer is body markdown on the page itself: no bubble, no dimming
+    // override — the kit's own body variant already paints label-primary.
+    assert.match(css, /\.dsh-sc-bubbleUser \{[^}]*background: var\(--dsh-sc-bubble\)/)
+    assert.match(css, /\.dsh-sc-bubbleUser \{[^}]*border-radius: 22px/)
+    assert.match(css, /\.dsh-sc-bubbleUser \{[^}]*padding: 10px 16px/)
+    // The thinking trace is a muted block with no rule around it, one step
+    // down from the answer — the chat web's own `.ds-think-content` treatment.
+    assert.match(css, /\.dsh-sc-thinkBody \{[^}]*color: var\(--dsw-alias-label-secondary\)/)
+    assert.match(css, /\.dsh-sc-thinkBody \{[^}]*font-size: var\(--dsh-content-font-size-secondary/)
+    assert.doesNotMatch(css, /\.dsh-sc-thinkBody \{[^}]*border-left/)
+    // The composer is the chat web's card: 24px radius, the input surface, a
+    // hairline, and the brand-blue circle for send.
+    assert.match(css, /\.dsh-sc-card \{[^}]*border-radius: 24px/)
+    assert.match(css, /\.dsh-sc-card \{[^}]*background: var\(--dsh-sc-card\)/)
+    assert.match(css, /\.dsh-sc-send \{[^}]*background: var\(--dsh-sc-accent\)/)
+    assert.match(css, /body\[data-ds-dark-theme\] \.dsh-sc-card \{ box-shadow: none; \}/)
+    // A chip that is on reads brand-blue, not grey.
+    assert.match(css, /\.dsh-sc-chip\.dsh-sc-chipOn \{[^}]*color: var\(--dsh-sc-accent-text\)/)
   })
 
   it('refreshes its stylesheet when a live page reloads the module', async () => {
@@ -841,13 +969,24 @@ describe('client bundle', () => {
       'providers are one band each',
     )
 
-    // Pick the thinking model: the chip appears beside the model chip, at Max.
+    // Pick the thinking model: the 深度思考 chip appears in the composer's
+    // left group, reading as on. The strongest level is the default, so naming
+    // it would be noise — the chip says what it does, not what it is set to.
     elementsOf(pickerTree, 'button').find((node) => node.props.key === 'model:p/thinking').props.onClick()
     const after = renderBody(body, { useTabInfo: () => info })
     const effortChip = chipOf(after, 'effort-button')
-    assert.ok(effortChip !== undefined, 'the effort chip appears after picking a model with efforts')
-    assert.ok(textsOf(effortChip).map(String).join('').includes('Max'), 'the default effort is the strongest')
+    assert.ok(effortChip !== undefined, 'the 深度思考 chip appears after picking a model with efforts')
+    const chipText = textsOf(effortChip).map(String).join('')
+    assert.ok(chipText.includes('深度思考'), 'the chip is labelled the way the chat web labels it')
+    assert.ok(!chipText.includes('Max'), 'the strongest level is the default and stays unnamed')
+    assert.equal(effortChip.props['data-pill'], 'on', 'thinking is on for a model that declares efforts')
     assert.equal(state.get().menu, '', 'picking a model closes the picker')
+
+    // Lowering the level names it on the chip, so the choice is visible
+    // without opening the menu.
+    state.set({ reasoningEffort: 'low' })
+    const lowered = chipOf(renderBody(body, { useTabInfo: () => info }), 'effort-button')
+    assert.ok(textsOf(lowered).map(String).join('').includes('低'), 'a lowered level is named on the chip')
   })
 
   it('treats a conversation without a stored preference as searching', async () => {
@@ -909,8 +1048,8 @@ describe('client bundle', () => {
     const tree = renderBody(body, { useTabInfo: () => ({ tab: { id: 'tab-tools' }, sidebar: {}, panel: {} }) })
     assertRenderable(tree)
     const texts = textsOf(tree).map(String)
-    assert.ok(texts.some((text) => text.includes('联网搜索 · 1 个来源')))
-    assert.ok(texts.some((text) => text.includes('搜索失败：额度用尽')))
+    assert.ok(texts.some((text) => text.includes('搜索到 1 个网页')))
+    assert.ok(texts.some((text) => text.includes('联网搜索暂不可用：额度用尽')))
     assert.ok(texts.some((text) => text.includes('正在搜索：正在进行')))
     // Opening the finished search's disclosure reveals its sources as links.
     const disclosure = elementsOf(tree, 'button').find((node) => node.props['data-disclosure-toggle'] !== undefined)
