@@ -92,6 +92,9 @@ function createReactStub() {
     useEffect(effect) {
       effects.push(effect)
     },
+    useLayoutEffect(effect) {
+      effects.push(effect)
+    },
     useCallback(fn) {
       return fn
     },
@@ -727,6 +730,94 @@ describe('client bundle', () => {
     assert.match(css, /body\[data-ds-dark-theme\] \.dsh-sc-card \{ box-shadow: none; \}/)
     // A chip that is on reads brand-blue, not grey.
     assert.match(css, /\.dsh-sc-chip\.dsh-sc-chipOn \{[^}]*color: var\(--dsh-sc-accent-text\)/)
+  })
+
+  it('refuses to paint a dropdown from a tab body nobody can see', async () => {
+    const { plugin, react, renderBody } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+    const body = componentOf(ctx, 'sidebar.right.pane.tab')
+    const info = { tab: { id: 'tab-hidden' }, sidebar: {}, panel: {} }
+    const props = { useTabInfo: () => info }
+    const menuRows = (tree) =>
+      elementsOf(tree, 'button').filter((node) => String(node.props['data-menu-item'] || '').startsWith('conversation:'))
+
+    const state = plugin._internal.stateOf('tab-hidden')
+    state.set({
+      status: 'ready',
+      menu: 'conversations',
+      conversations: [{ id: 'c-1', title: '一个会话', updatedAt: Date.now() }],
+      conversation: { id: 'c-1', title: '一个会话', messages: [] },
+    })
+
+    // On screen: the menu is drawn, and the anchor that opens it stays put.
+    const shown = renderBody(body, props)
+    react.flushEffects()
+    assert.equal(menuRows(shown).length, 1, 'a visible tab draws its conversation menu')
+
+    // The shell keeps one sidebar per session mounted and hides the inactive
+    // ones with `display: none`; the body then has no box, and a portalled menu
+    // would land at the viewport corner with nothing under it.
+    const root = elementsOf(shown, 'div').find((node) => node.props['data-dsh-sidebar-chat'] === 'body')
+    assert.ok(root !== undefined && root.props.ref !== undefined, 'the body carries the ref the gate measures')
+    root.props.ref.current = {
+      ownerDocument: { defaultView: { innerWidth: 1200, innerHeight: 800 } },
+      getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+    }
+    renderBody(body, props)
+    react.flushEffects()
+    const hidden = renderBody(body, props)
+    assert.equal(menuRows(hidden).length, 0, 'a body with no box draws no floating layer')
+    assert.ok(
+      elementsOf(hidden, 'button').some((node) => node.props['data-dsh-sc'] === 'conversation-button'),
+      'the anchor itself is still there, so the state is not lost',
+    )
+
+    // And it comes back the moment the body has a box again.
+    root.props.ref.current = {
+      ownerDocument: { defaultView: { innerWidth: 1200, innerHeight: 800 } },
+      getBoundingClientRect: () => ({ top: 40, left: 900, right: 1200, bottom: 700, width: 300, height: 660 }),
+    }
+    renderBody(body, props)
+    react.flushEffects()
+    assert.equal(menuRows(renderBody(body, props)).length, 1, 'the menu returns with the box')
+  })
+
+  it('judges "on screen" from the box, the visibility chain, and the viewport', async () => {
+    const { plugin } = await loadClient({ withPrimitives: true })
+    const { isOnScreen } = plugin._internal
+
+    // Before the ref attaches there is nothing to judge; drawing is the safe
+    // default, or the first paint of every tab would lose its menus.
+    assert.equal(isOnScreen(null), true)
+    assert.equal(isOnScreen({}), true, 'a node without a box API is not evidence of anything')
+
+    const view = { innerWidth: 1200, innerHeight: 800 }
+    const node = (rect, extra = {}) =>
+      Object.assign(
+        {
+          ownerDocument: { defaultView: view },
+          getBoundingClientRect: () => Object.assign({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }, rect),
+        },
+        extra,
+      )
+    const box = { top: 10, left: 900, right: 1200, bottom: 700, width: 300, height: 690 }
+
+    assert.equal(isOnScreen(node(box)), true)
+    assert.equal(isOnScreen(node({ ...box, width: 0, height: 0 })), false, 'display:none leaves no box')
+    assert.equal(isOnScreen(node({ ...box, left: 1300, right: 1500 })), false, 'a sidebar slid off the right edge')
+    assert.equal(isOnScreen(node({ ...box, top: -900, bottom: -100 })), false, 'scrolled above the viewport')
+    assert.equal(
+      isOnScreen(node(box, { checkVisibility: () => false })),
+      false,
+      'visibility:hidden keeps the box, so only checkVisibility catches it',
+    )
+    assert.equal(isOnScreen(node(box, { checkVisibility: () => true })), true)
+    assert.equal(
+      isOnScreen(node(box, { checkVisibility: () => { throw new Error('unsupported options') } })),
+      true,
+      'an engine that rejects the options object falls back to the box',
+    )
   })
 
   it('refreshes its stylesheet when a live page reloads the module', async () => {
