@@ -122,14 +122,18 @@ profile 的 `bundles` 列表与 `cordis.patch.yml` 都会被热重载，**存盘
 
 所以浮动层（会话菜单 / 模型卡片 / 思考等级菜单）在画之前先过一次 `isOnScreen()`：`checkVisibility({visibilityProperty: true})` 挡住 `visibility: hidden` 祖先，包围盒挡住 `display: none` 与滑出视口的侧栏。外壳自己判断「面板可见吗」用的也是同一套（`pane.closest('[hidden], [aria-hidden="true"]')`）。判不出来时（ref 还没挂、引擎不认 options）一律当作可见——宁可多画一次，也不能让正常页签开不出菜单。
 
+第四个是**组件库的 props 没有默认值**，页签在这里栽过第二次：外壳的 `MarkdownText` 只在渲染时读 `labels`，**不设兜底**——回答里出现第一个代码围栏就会读 `labels.code.copyLabel`（还有 `copiedLabel`、`code.toolbarLabels.*`），脚注再读 `labels.footnotes`。本插件原先传的是 `Object.freeze({})`，于是一段 ``` 就把渲染打挂。
+
+打挂的代价被外壳的 slot 运行时放大了：抛错的条目会被**退役**（`SlotCore.reportEntryError` 把它从该 cell 的 entries 投影里永久排除，注册却仍留在账上）。表现因此极具误导性——页签 chip 还在、内容区全白、连「页签不可用」都不显示；刷新后页签恢复上次会话，只要那段代码块还在就立刻复现，看起来就像「重启也没用」。现在词表按外壳自己的构造器补齐（`markdownLabels()`，见 `@deepseek-ai/dsh-client-ui-chat`）：`code.copyLabel/copiedLabel`、`code.toolbarLabels.codeLabel/wrapLabel/unwrapLabel`、`footnotes`，并保持 frozen 与引用稳定（流式渲染缓存按身份比对，换一个对象就丢缓存）。另外 `MarkdownBoundary` 兜住组件库渲染时的抛错，降级成答案的纯文本——组件库与本插件版本独立，下次它再改形状，该是答案变朴素，而不是整个页签变白板。
+
 ## 开发
 
 ```sh
-node --test test/          # 57 个用例：存储、消息装配、流事件、客户端注册与渲染
+node --test test/          # 59 个用例：存储、消息装配、流事件、客户端注册与渲染
 node tools/smoke.mjs       # 对着正在运行的 harness 跑真实链路（会自建自删一个会话）
 ```
 
-两层测试：`test/core.test.mjs` 覆盖 host 半的纯逻辑（临时存储、会话存储、transcript→messages、流事件归一），`test/client.test.mjs` 用 `node:vm` + 桩 React（带 hook 与 effect 队列、可注入 fetch）跑一遍浏览器半：断言页签类型与两个 seat 的注册、把组件树真渲染出来（空态 / 带历史 / 模型菜单 / 会话菜单 / 组件库与降级两条路径），对「新建会话必须新建而不是重开最近一个」「会话被别处删掉后仍能继续」这类行为做接口级断言，也对这次重写的界面契约上锁：空态是鲸鱼 + 官方问候语、思考行按「正在思考 / 已思考（用时 N 秒）/ 思考已停止」三种状态取名、复制按钮只出现在已经有文字的回答上且真的把正文交给 `writeClipboard`、两个芯片的文案与选中态、以及样式表里那几个官方数值（22px 气泡圆角、24px 卡片圆角、深色下无阴影、芯片选中态用品牌蓝文字）。`isOnScreen()` 同时有单元测试（无盒 / 滑出视口 / `visibility: hidden` / 引擎不认 options）和一条接口级断言：把根元素的 ref 换成一个零尺寸的假节点后重渲染，菜单必须消失而锚点按钮仍在，换回有盒的节点后菜单必须回来。
+两层测试：`test/core.test.mjs` 覆盖 host 半的纯逻辑（临时存储、会话存储、transcript→messages、流事件归一），`test/client.test.mjs` 用 `node:vm` + 桩 React（带 hook 与 effect 队列、可注入 fetch）跑一遍浏览器半：断言页签类型与两个 seat 的注册、把组件树真渲染出来（空态 / 带历史 / 模型菜单 / 会话菜单 / 组件库与降级两条路径），对「新建会话必须新建而不是重开最近一个」「会话被别处删掉后仍能继续」这类行为做接口级断言，也对这次重写的界面契约上锁：空态是鲸鱼 + 官方问候语、思考行按「正在思考 / 已思考（用时 N 秒）/ 思考已停止」三种状态取名、复制按钮只出现在已经有文字的回答上且真的把正文交给 `writeClipboard`、两个芯片的文案与选中态、以及样式表里那几个官方数值（22px 气泡圆角、24px 卡片圆角、深色下无阴影、芯片选中态用品牌蓝文字）。`isOnScreen()` 同时有单元测试（无盒 / 滑出视口 / `visibility: hidden` / 引擎不认 options）和一条接口级断言：把根元素的 ref 换成一个零尺寸的假节点后重渲染，菜单必须消失而锚点按钮仍在，换回有盒的节点后菜单必须回来。组件库桩还**按真实 `MarkdownText` 的方式解引用 `labels`**（`code.copyLabel`、`code.toolbarLabels.*`、`footnotes`），所以「词表传漏了」会在测试里红，而不是等你打开页签看到一个白板；`MarkdownBoundary` 的降级路径（把答案退回纯文本）另有单独断言。
 
 `tools/smoke.mjs` 打的是真接口（17 项）：模型目录与搜索可用性、会话增删、图片上传与取回、带图回合（挑一个声明支持图片的模型）、纯文本模型的降级提示、**联网搜索整条链路**（模型发起搜索 → 来源返回 → 正文收尾 → 活动落盘）、停止按钮中止回合、以及「中止的回合仍然写入历史」。默认 `http://127.0.0.1:19387`，可用 `--base` / `--model` / `--text-model` 覆盖，`--keep` 保留测试会话，`--skip-search` 跳过联网检查（会消耗一次真实搜索）。
 

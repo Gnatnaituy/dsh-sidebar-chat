@@ -231,7 +231,27 @@ function createKitStub(React) {
       h('button', { type: 'button', 'data-disclosure-toggle': true, onClick: () => props.expandable !== false && props.onToggle() }, props.icon, props.title),
       props.open === true ? props.children : null,
     )
-  const MarkdownText = (props) => h('div', { 'data-md': props.streaming === true ? 'streaming' : 'settled', 'data-variant': props.variant }, props.text)
+  // The real kit reads this vocabulary WITHOUT defaults: a code fence reaches
+  // `labels.code.copyLabel` and `labels.code.toolbarLabels.*`, footnotes reach
+  // `labels.footnotes`. A throw in there retires the whole sidebar tab, so the
+  // stub dereferences the same keys — an incomplete bag must fail here.
+  const MarkdownText = (props) =>
+    h(
+      'div',
+      {
+        'data-md': props.streaming === true ? 'streaming' : 'settled',
+        'data-variant': props.variant,
+        'data-copy-label': props.labels.code.copyLabel,
+        'data-copied-label': props.labels.code.copiedLabel,
+        'data-toolbar-labels': [
+          props.labels.code.toolbarLabels.codeLabel,
+          props.labels.code.toolbarLabels.wrapLabel,
+          props.labels.code.toolbarLabels.unwrapLabel,
+        ].join('/'),
+        'data-footnotes': props.labels.footnotes,
+      },
+      props.text,
+    )
   const ImageLightbox = (props) => h('div', { 'data-lightbox': props.src }, props.alt)
   const FishLogo = (props) => h('svg', { 'data-fish': true, width: props?.size ?? 24 })
   // The real helper writes to the host clipboard; the stub records the calls so
@@ -704,6 +724,66 @@ describe('client bundle', () => {
     assert.ok(actions.includes('conversation:c-9'))
     assert.ok(actions.includes('action:new'))
     assert.ok(actions.includes('action:delete'))
+  })
+
+  it('hands the shell markdown renderer its complete chrome vocabulary', async () => {
+    const { plugin, renderBody } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+    const body = componentOf(ctx, 'sidebar.right.pane.tab')
+
+    const state = plugin._internal.stateOf('tab-4')
+    state.set({
+      status: 'ready',
+      conversation: {
+        id: 'c-9',
+        title: 't',
+        provider: 'p',
+        model: 'm',
+        messages: [{ id: 'a1', role: 'assistant', text: '```js\nconst a = 1\n```', status: 'done', at: 1 }],
+      },
+      conversations: [{ id: 'c-9', title: 't', updatedAt: Date.now() }],
+    })
+
+    const tree = renderBody(body, { useTabInfo: () => ({ tab: { id: 'tab-4' }, sidebar: {}, panel: {} }) })
+    assertRenderable(tree)
+
+    // The stub above dereferences the same keys the real kit does, so reaching
+    // this line at all is the regression check; the values are this plugin's own.
+    const labels = plugin._internal.markdownLabels
+    assert.equal(labels.code.copyLabel, '复制代码')
+    assert.equal(labels.code.copiedLabel, '已复制')
+    assert.equal(labels.code.toolbarLabels.codeLabel, '代码')
+    assert.equal(labels.code.toolbarLabels.wrapLabel, '自动换行')
+    assert.equal(labels.code.toolbarLabels.unwrapLabel, '取消自动换行')
+    assert.equal(labels.footnotes, '脚注')
+    assert.ok(Object.isFrozen(labels) && Object.isFrozen(labels.code), 'the bag stays reference-stable')
+
+    const rendered = elementsOf(tree, 'div').find((node) => node.props['data-md'] !== undefined)
+    assert.equal(rendered.props['data-copy-label'], '复制代码')
+    assert.equal(rendered.props['data-toolbar-labels'], '代码/自动换行/取消自动换行')
+    assert.equal(rendered.props['data-footnotes'], '脚注')
+  })
+
+  it('keeps a crashing markdown renderer from blanking the tab', async () => {
+    const { plugin } = await loadClient({ withPrimitives: true })
+    const Boundary = plugin._internal.MarkdownBoundary
+
+    // React asks the boundary for the next state when a child throws.
+    const next = Boundary.getDerivedStateFromError(new Error('boom'))
+    assert.equal(next.failed, true)
+
+    // Before the crash it is a pass-through: the kit's output is what shows.
+    const healthy = new Boundary({ text: '# 标题', children: 'kit output' })
+    assert.equal(healthy.render(), 'kit output')
+
+    // After the crash the same answer survives as plain text.
+    const failed = new Boundary({ text: '# 标题' })
+    failed.state = { failed: true }
+    const tree = failed.render()
+    assert.equal(tree.type, 'div')
+    assert.equal(tree.props.className, 'dsh-sc-plain')
+    assert.equal(tree.props.children, '# 标题')
   })
 
   it('paints the answer in the chat web palette and the reasoning dimmer', async () => {
