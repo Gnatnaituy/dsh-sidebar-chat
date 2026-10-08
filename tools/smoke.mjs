@@ -294,6 +294,14 @@ const roles = settled.conversation.messages.map((message) => message.role)
 check('回合写回历史', roles.includes('user') && roles.includes('assistant'), roles.join(','))
 const assistant = settled.conversation.messages.filter((message) => message.role === 'assistant')
 check('助手正文已持久化', assistant.some((message) => (message.text ?? '').length > 0))
+// The tally line the tab prints is read back from the transcript, so every
+// turn this build produced has to carry its own clock — the aborted one
+// included, since the tab names its elapsed time too.
+check(
+  '回合耗时写入历史',
+  assistant.length > 0 && assistant.every((message) => typeof message.durationMs === 'number' && message.durationMs > 0),
+  assistant.map((message) => `${message.status}=${message.durationMs}ms`).join(' / '),
+)
 
 if (keep) {
   console.log(`\n保留会话 ${conversationId}（--keep）`)

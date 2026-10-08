@@ -559,6 +559,69 @@ describe('client bundle', () => {
     assert.equal(elementsOf(emptyTree, 'svg').filter((node) => node.props['data-fish'] === true).length, 1, 'the greeting sits under the whale')
   })
 
+  it('tallies each settled turn in tokens and elapsed time', async () => {
+    const { plugin, react, renderBody } = await loadClient({ withPrimitives: true })
+    const { ctx } = createContext()
+    plugin.apply(ctx)
+    const body = componentOf(ctx, 'sidebar.right.pane.tab')
+
+    // The formatter on its own: a tenth at the fast end, whole seconds in the
+    // middle, minutes once a turn runs long — and nothing at all without a span.
+    const durationText = plugin._internal.durationText
+    assert.equal(durationText(0), '', 'no clock, no claim')
+    assert.equal(durationText(undefined), '')
+    assert.equal(durationText(1), '0.1 秒')
+    assert.equal(durationText(4240), '4.2 秒')
+    assert.equal(durationText(9500), '9.5 秒')
+    assert.equal(durationText(12400), '12 秒')
+    assert.equal(durationText(59900), '1 分', 'a hair under a minute rounds to it, never to "60 秒"')
+    assert.equal(durationText(60500), '1 分 1 秒')
+    assert.equal(durationText(120000), '2 分')
+
+    plugin._internal.stateOf('tab-tally').set({
+      status: 'ready',
+      conversation: {
+        id: 'c-tally',
+        title: 't',
+        provider: 'p',
+        model: 'm',
+        messages: [
+          // Both halves known: tokens first, the elapsed time after them.
+          { id: 'u1', role: 'user', text: '问一', at: 1000 },
+          { id: 't1', role: 'assistant', text: '答一', status: 'done', usage: { inputTokens: 120, outputTokens: 34 }, durationMs: 2600, at: 3600 },
+          // A stored turn with no recorded clock reads one back from the two
+          // ends the transcript kept: the question it answers, and itself.
+          { id: 'u2', role: 'user', text: '问二', at: 1000000 },
+          { id: 't2', role: 'assistant', text: '答二', status: 'done', at: 1012400 },
+          // A row with neither a clock nor a start keeps its token line alone.
+          { id: 't3', role: 'assistant', text: '答三', status: 'done', usage: { inputTokens: 8, outputTokens: 2 } },
+          // A stopped turn ends the same way.
+          { id: 't4', role: 'assistant', text: '答四', status: 'aborted', durationMs: 61000, at: 4000000 },
+          // A row the tab is still holding itself: its two ends are the moment
+          // the words were typed, so their difference is not a wait.
+          { id: 'u5', role: 'user', text: '问五', at: 2000000 },
+          { id: 'local-assistant-5', role: 'assistant', text: '答五', status: 'done', at: 2000002 },
+          // Nothing settled yet, so no tally at all — even with usage already
+          // reported mid-stream.
+          { id: 't6', role: 'assistant', text: '答六', status: 'streaming', usage: { inputTokens: 3, outputTokens: 0 }, at: 5000000 },
+        ],
+      },
+    })
+
+    const tree = renderBody(body, { useTabInfo: () => ({ tab: { id: 'tab-tally' }, sidebar: {}, panel: {} }) })
+    assertRenderable(tree)
+    const tallies = elementsOf(tree, 'div')
+      .filter((node) => node.props['data-dsh-sc'] === 'tally')
+      .map((node) => textsOf(node).map(String).join(''))
+    assert.deepEqual(tallies, [
+      '输入 120 · 输出 34 tokens · 耗时 2.6 秒',
+      '耗时 12 秒',
+      '输入 8 · 输出 2 tokens',
+      '耗时 1 分 1 秒',
+      '输入 3 · 输出 0 tokens',
+    ], 'one line per settled turn, in transcript order')
+  })
+
   it('names both composer chips the way the chat web does', async () => {
     const { plugin, react, renderBody } = await loadClient({ withPrimitives: true })
     const { ctx } = createContext()
@@ -607,8 +670,8 @@ describe('client bundle', () => {
         messages: [
           { id: 'u1', role: 'user', text: '这是什么？', attachments: [{ id: 'a-1', name: 'x.png', mediaType: 'image/png' }], at: 1 },
           { id: 'a1', role: 'assistant', text: '**一张图**', reasoning: '想想', status: 'streaming', at: 2 },
-          { id: 'a2', role: 'assistant', text: 'done', status: 'done', usage: { inputTokens: 5, outputTokens: 7 }, at: 3 },
-          { id: 'a3', role: 'assistant', text: '', status: 'error', error: { code: 'RATE_LIMIT', message: '慢一点' }, at: 4 },
+          { id: 'a2', role: 'assistant', text: 'done', status: 'done', usage: { inputTokens: 5, outputTokens: 7 }, durationMs: 4200, at: 3 },
+          { id: 'a3', role: 'assistant', text: '', status: 'error', error: { code: 'RATE_LIMIT', message: '慢一点' }, durationMs: 900, at: 4 },
         ],
       },
       draft: '接下来问什么',
@@ -624,7 +687,11 @@ describe('client bundle', () => {
     assert.ok(texts.includes('**一张图**'))
     assert.ok(texts.includes('这是什么？'))
     assert.ok(texts.some((text) => text.includes('RATE_LIMIT') && text.includes('慢一点')))
-    assert.ok(texts.some((text) => text.includes('输入 5')))
+    assert.ok(
+      texts.includes('输入 5 · 输出 7 tokens · 耗时 4.2 秒'),
+      'the elapsed time sits after the token counts, on the same meta line',
+    )
+    assert.ok(texts.includes('耗时 0.9 秒'), 'a failed turn still says how long the reader waited')
     assert.ok(texts.includes('正在思考'), 'a streaming turn names its reasoning as running')
     assert.equal(elementsOf(tree, 'textarea')[0].props.value, '接下来问什么')
     assert.equal(windowStub.localStorage.getItem('dsh-sidebar-chat:last-model'), null)
